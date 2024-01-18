@@ -1,0 +1,121 @@
+version: '3.3'
+
+services:
+
+  # Cassandra 4 with the DataStax Change Agent enabled
+  cassandra:
+    image: cassandra:4.0.11
+    container_name: cassandra
+    environment:
+      - "MAX_HEAP_SIZE=1200m"
+      - "HEAP_NEWSIZE=300m"
+      - "DS_LICENSE=accept"
+      - "CASSANDRA_DC=datacenter1"
+      - "DC=datacenter1"
+      - "LOCAL_JMX=no"
+      - "JVM_EXTRA_OPTS=-Djava.rmi.server.hostname=127.0.0.1 -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Dcom.sun.management.jmxremote.rmi.port=7199 -javaagent:/etc/cassandra-source-agent/agent-c4-pulsar-1.0.5-all.jar=pulsarServiceUrl=pulsar://pulsar:6650,cdcWorkingDir=/var/lib/cassandra/cdc,pulsarBatchDelayInMs=100"
+#      - "JVM_EXTRA_OPTS=-Djava.rmi.server.hostname=127.0.0.1 -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false -Dcom.sun.management.jmxremote.rmi.port=7199 -javaagent:/etc/cassandra-source-agent/agent-c4-pulsar-1.0.5-all.jar=pulsarServiceUrl=pulsar://pulsar:6650,cdcWorkingDir=/var/lib/cassandra/cdc,pulsarBatchDelayInMs=100 -javaagent:/jmx_prometheus_javaagent-0.16.1.jar=8081:/jmx_prometheus_exporter.yaml -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=8000"
+    volumes:
+      # Enable cdc and change agent to be loaded by providing custpom configurations
+      - ./config/cassandra.yaml:/etc/cassandra/cassandra.yaml
+#      - ./config/jvm-server.options:/etc/cassandra/jvm-server.options
+#      - ./config/cassandra-env.sh:/etc/cassandra/cassandra-env.sh
+      - ./cassandra-source-agent:/etc/cassandra-source-agent
+    networks:
+      - backend
+
+  # Pulsar
+  pulsar:
+    image: apachepulsar/pulsar:latest
+    container_name: pulsar
+    volumes:
+      # Mount the folder for the DataStax Cassandra Source Connector
+      - ./twitter-router-function/twitter-router-0.0.1-SNAPSHOT.jar:/pulsar/connectors/twitter-router-0.0.1-SNAPSHOT.jar
+      - ./twitter-router-function/twitter-router-function.yaml:/etc/twitter-router-function/twitter-router-function.yaml
+      - ./cassandra-source-connector/pulsar-cassandra-source-1.0.1.nar:/pulsar/connectors/pulsar-cassandra-source-1.0.1.nar
+      - ./cassandra-sink-connector/cassandra-enhanced-pulsar-sink-1.5.0-nar.nar:/pulsar/connectors/cassandra-enhanced-pulsar-sink-1.5.0-nar.nar
+      - ./cassandra-sink-connector/tweet-db-sink.yml:/etc/cassandra-sink-connector/tweet-db-sink.yml
+      - ./kafka-connector/pulsar-io-kafka-2.9.1.nar:/pulsar/connectors/pulsar-io-kafka-2.9.1.nar
+      - ./kafka-connector/kafka-connector.yaml:/etc/kafka-connector.yaml
+    environment:
+      PULSAR_MEM: " -Xms512m -Xmx512m -XX:MaxDirectMemorySize=1g"
+    command: |
+      /bin/bash -c "bin/apply-config-from-env.py conf/standalone.conf && bin/pulsar standalone"
+    networks:
+      - backend
+
+  # prometheus and grafana
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - 9090:9090
+    volumes:
+      - ./config/standalone.yml.template:/etc/prometheus/prometheus.yml
+    depends_on:
+      - pulsar
+    networks:
+      - backend
+
+  grafana:
+    image: grafana/grafana-oss
+    container_name: grafana
+    ports:
+      - 3000:3000
+    volumes:
+      - ./grafana/config.ini:/etc/grafana/config.ini
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - prometheus
+    networks:
+      - backend
+
+  jmx-kafka:
+    image: "sscaling/jmx-prometheus-exporter"
+    ports:
+     - "5556:5556"
+    environment:
+     CONFIG_YML : "/etc/jmx_exporter/config.yml"
+    volumes:
+     - ./jmx-exporter/kafka-config.yaml:/etc/jmx_exporter/config.yml
+    container_name: jmx-kafka
+    depends_on:
+     - kafka
+    networks:
+      - backend
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - 22181:2181
+    networks:
+      - backend
+  
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - 29092:29092
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9991
+    networks:
+      - backend
+
+networks:
+  backend:
